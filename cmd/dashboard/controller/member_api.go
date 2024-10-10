@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -305,6 +306,7 @@ type serverForm struct {
 	Secret       string
 	Tag          string
 	Note         string
+	PublicNote   string
 	HideForGuest string
 	EnableDDNS   string
 	EnableIPv4   string
@@ -325,6 +327,7 @@ func (ma *memberAPI) addOrEditServer(c *gin.Context) {
 		s.ID = sf.ID
 		s.Tag = sf.Tag
 		s.Note = sf.Note
+		s.PublicNote = sf.PublicNote
 		s.HideForGuest = sf.HideForGuest == "on"
 		s.EnableDDNS = sf.EnableDDNS == "on"
 		s.EnableIPv4 = sf.EnableIPv4 == "on"
@@ -384,6 +387,7 @@ func (ma *memberAPI) addOrEditServer(c *gin.Context) {
 	} else {
 		s.Host = &model.Host{}
 		s.State = &model.HostState{}
+		s.TaskCloseLock = new(sync.Mutex)
 		singleton.ServerLock.Lock()
 		singleton.SecretToID[s.Secret] = s.ID
 		singleton.ServerList[s.ID] = &s
@@ -906,6 +910,7 @@ type settingForm struct {
 	Theme                   string
 	DashboardTheme          string
 	CustomCode              string
+	CustomCodeDashboard     string
 	ViewPassword            string
 	IgnoredIPNotification   string
 	IPChangeNotificationTag string // IP变更提醒的通知组
@@ -935,7 +940,7 @@ func (ma *memberAPI) updateSetting(c *gin.Context) {
 		return
 	}
 
-	if _, yes := model.Themes[sf.DashboardTheme]; !yes {
+	if _, yes := model.DashboardThemes[sf.DashboardTheme]; !yes {
 		c.JSON(http.StatusOK, model.Response{
 			Code:    http.StatusBadRequest,
 			Message: fmt.Sprintf("后台主题不存在：%s", sf.DashboardTheme),
@@ -971,6 +976,7 @@ func (ma *memberAPI) updateSetting(c *gin.Context) {
 	singleton.Conf.Site.Theme = sf.Theme
 	singleton.Conf.Site.DashboardTheme = sf.DashboardTheme
 	singleton.Conf.Site.CustomCode = sf.CustomCode
+	singleton.Conf.Site.CustomCodeDashboard = sf.CustomCodeDashboard
 	singleton.Conf.Site.ViewPassword = sf.ViewPassword
 	singleton.Conf.Oauth2.Admin = sf.Admin
 	// 保证NotificationTag不为空

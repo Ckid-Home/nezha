@@ -1,10 +1,13 @@
 package model
 
 import (
+	"slices"
 	"strings"
 	"time"
 
 	"gorm.io/gorm"
+
+	"github.com/naiba/nezha/pkg/utils"
 )
 
 const (
@@ -40,19 +43,6 @@ func percentage(used, total uint64) float64 {
 		return 0
 	}
 	return float64(used) * 100 / float64(total)
-}
-
-func maxSliceValue(slice []float64) float64 {
-	if len(slice) != 0 {
-		max := slice[0]
-		for _, val := range slice {
-			if max < val {
-				max = val
-			}
-		}
-		return max
-	}
-	return 0
 }
 
 // Snapshot 未通过规则返回 struct{}{}, 通过返回 nil
@@ -103,21 +93,21 @@ func (u *Rule) Snapshot(cycleTransferStats *CycleTransferStats, server *Server, 
 			src = float64(server.LastActive.Unix())
 		}
 	case "transfer_in_cycle":
-		src = float64(server.State.NetInTransfer - uint64(server.PrevHourlyTransferIn))
+		src = float64(utils.Uint64SubInt64(server.State.NetInTransfer, server.PrevTransferInSnapshot))
 		if u.CycleInterval != 0 {
 			var res NResult
 			db.Model(&Transfer{}).Select("SUM(`in`) AS n").Where("datetime(`created_at`) >= datetime(?) AND server_id = ?", u.GetTransferDurationStart().UTC(), server.ID).Scan(&res)
 			src += float64(res.N)
 		}
 	case "transfer_out_cycle":
-		src = float64(server.State.NetOutTransfer - uint64(server.PrevHourlyTransferOut))
+		src = float64(utils.Uint64SubInt64(server.State.NetOutTransfer, server.PrevTransferOutSnapshot))
 		if u.CycleInterval != 0 {
 			var res NResult
 			db.Model(&Transfer{}).Select("SUM(`out`) AS n").Where("datetime(`created_at`) >= datetime(?) AND server_id = ?", u.GetTransferDurationStart().UTC(), server.ID).Scan(&res)
 			src += float64(res.N)
 		}
 	case "transfer_all_cycle":
-		src = float64(server.State.NetOutTransfer - uint64(server.PrevHourlyTransferOut) + server.State.NetInTransfer - uint64(server.PrevHourlyTransferIn))
+		src = float64(utils.Uint64SubInt64(server.State.NetOutTransfer, server.PrevTransferOutSnapshot) + utils.Uint64SubInt64(server.State.NetInTransfer, server.PrevTransferInSnapshot))
 		if u.CycleInterval != 0 {
 			var res NResult
 			db.Model(&Transfer{}).Select("SUM(`in`+`out`) AS n").Where("datetime(`created_at`) >= datetime(?) AND server_id = ?", u.GetTransferDurationStart().UTC(), server.ID).Scan(&res)
@@ -143,7 +133,7 @@ func (u *Rule) Snapshot(cycleTransferStats *CycleTransferStats, server *Server, 
 					temp = append(temp, tempStat.Temperature)
 				}
 			}
-			src = maxSliceValue(temp)
+			src = slices.Max(temp)
 		}
 	}
 

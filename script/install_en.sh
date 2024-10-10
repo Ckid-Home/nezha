@@ -12,7 +12,7 @@ NZ_DASHBOARD_PATH="${NZ_BASE_PATH}/dashboard"
 NZ_AGENT_PATH="${NZ_BASE_PATH}/agent"
 NZ_DASHBOARD_SERVICE="/etc/systemd/system/nezha-dashboard.service"
 NZ_DASHBOARD_SERVICERC="/etc/init.d/nezha-dashboard"
-NZ_VERSION="v0.18.3"
+NZ_VERSION="v0.19.2"
 
 red='\033[0;31m'
 green='\033[0;32m'
@@ -65,6 +65,8 @@ geo_check() {
 }
 
 pre_check() {
+    umask 077
+
     ## os_arch
     if uname -m | grep -q 'x86_64'; then
         os_arch="amd64"
@@ -287,8 +289,6 @@ install_dashboard() {
         esac
     fi
 
-    sudo chmod -R 700 $NZ_DASHBOARD_PATH
-
     if [ "$IS_DOCKER_NEZHA" = 1 ]; then
         install_dashboard_docker
     elif [ "$IS_DOCKER_NEZHA" = 0 ]; then
@@ -374,7 +374,6 @@ install_agent() {
 
     # Nezha Monitoring Folder
     sudo mkdir -p $NZ_AGENT_PATH
-    sudo chmod -R 700 $NZ_AGENT_PATH
 
     echo "Downloading Agent"
     wget -t 2 -T 60 -O nezha-agent_linux_${os_arch}.zip https://${GITHUB_URL}/nezhahq/agent/releases/download/${version}/nezha-agent_linux_${os_arch}.zip >/dev/null 2>&1
@@ -448,11 +447,16 @@ modify_dashboard_config() {
     echo "> Modify Dashboard Configuration"
 
     if [ "$IS_DOCKER_NEZHA" = 1 ]; then
-        echo "Download Docker Script"
-        wget -t 2 -T 60 -O /tmp/nezha-docker-compose.yaml https://${GITHUB_RAW_URL}/script/docker-compose.yaml >/dev/null 2>&1
-        if [ $? != 0 ]; then
-            err "Script failed to get, please check if the network can link ${GITHUB_RAW_URL}"
-            return 0
+        if [ ! -z "$DOCKER_COMPOSE_COMMAND" ]; then
+            echo "Download Docker Script"
+            wget -t 2 -T 60 -O /tmp/nezha-docker-compose.yaml https://${GITHUB_RAW_URL}/script/docker-compose.yaml >/dev/null 2>&1
+            if [ $? != 0 ]; then
+                err "Script failed to get, please check if the network can link ${GITHUB_RAW_URL}"
+                return 0
+            fi
+        else
+            err "请手动安装 docker-compose。https://docs.docker.com/compose/install/linux/"
+            before_show_menu
         fi
     fi
 
@@ -598,7 +602,7 @@ restart_and_update_standalone() {
         NZ_DASHBOARD_URL="https://${GITHUB_URL}/naibahq/nezha/releases/download/$version/dashboard-linux-$os_arch.zip"
     fi
 
-    sudo wget -qO $NZ_DASHBOARD_PATH/app.zip $NZ_DASHBOARD_URL >/dev/null 2>&1 && sudo unzip -qq $NZ_DASHBOARD_PATH/app.zip -d $NZ_DASHBOARD_PATH && sudo mv $NZ_DASHBOARD_PATH/dist/dashboard-linux-$os_arch $NZ_DASHBOARD_PATH/app && sudo rm -r $NZ_DASHBOARD_PATH/app.zip $NZ_DASHBOARD_PATH/dist
+    sudo wget -qO $NZ_DASHBOARD_PATH/app.zip $NZ_DASHBOARD_URL >/dev/null 2>&1 && sudo unzip -qq -o $NZ_DASHBOARD_PATH/app.zip -d $NZ_DASHBOARD_PATH && sudo mv $NZ_DASHBOARD_PATH/dashboard-linux-$os_arch $NZ_DASHBOARD_PATH/app && sudo rm $NZ_DASHBOARD_PATH/app.zip
 
     if [ "$os_alpine" != 1 ]; then
         sudo systemctl enable nezha-dashboard

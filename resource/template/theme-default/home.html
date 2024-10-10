@@ -194,7 +194,7 @@
             ]
         },
         mixins: [mixinsVue],
-            created() {
+        created() {
             this.servers = JSON.parse('{{.Servers}}').servers;
             this.group()
         },
@@ -240,12 +240,12 @@
                 const itemHeight = isMobile ? 10 : 10;
                 const gridLeft = 25;
                 const gridRight = 12;
-                const fontColor = "rgba(0, 0, 0, 0.68)";
                 const backgroundColor = '';
                 const borderColor = "#ffffff";
                 const chartData = this.chartDataList[id - 1];
                 const chartContainer = this.$refs[`chart${id}`][0];
-                const chart = echarts.init(chartContainer, null, {
+                const chartTheme = $('html').attr('nz-theme') == "dark" ? "dark" : "";
+                const chart = echarts.init(chartContainer, chartTheme, {
                     renderer: 'canvas',
                     useDirtyRect: false,
                     width: 'auto',
@@ -283,7 +283,6 @@
                         trigger: 'axis',
                         textStyle: {
                             fontSize: fontSize,
-                            color: fontColor
                         }
                     },
                     legend: {
@@ -292,7 +291,6 @@
                         show: true,
                         textStyle: {
                             fontSize: fontSize,
-                            color: fontColor
                         },
                         lineStyle: {
                             cap: 'butt'
@@ -332,7 +330,6 @@
                     series: seriesData,
                     textStyle: {
                         fontSize: fontSize,
-                        color: fontColor
                     },
                     grid: {
                         top: '30',
@@ -477,21 +474,23 @@
                 const sizes = ["B", "K", "M", "G", "T", "P", "E", "Z", "Y"];
                 return parseFloat((bytes / Math.pow(1024, i)).toFixed(2)) + sizes[i];
             },
-            getCoreAndGHz(str){
-                if ((str || []).hasOwnProperty(0) === false) {
+            getCoreAndGHz(arr) {
+                if ((arr || []).length === 0) {
                     return '';
                 }
-                str = str[0];
-                let GHz = str.match(/(\d|\.)+GHz/g);
-                let Core = str.match(/(\d|\.)+ Physical/g);
-                GHz = GHz !== null ? GHz.hasOwnProperty(0) === false ? '' : GHz[0] : ''
-                Core = Core !== null ? Core.hasOwnProperty(0) === false ? '?' : Core[0] : '?'
-                if (Core === '?') {
-                    let Core = str.match(/(\d|\.)+ Virtual/g);
-                    Core = Core !== null ? Core.hasOwnProperty(0) === false ? '?' : Core[0] : '?'
-                    return Core.replace('Virtual', 'Core')
-                }
-                return Core.replace('Physical', 'Core');
+                let totalCores = 0;
+                arr.forEach(str => {
+                    let coreMatch = str.match(/(\d+(\.\d+)?) Physical/g);
+                    let coreCount = 0;
+                    if (coreMatch) {
+                        coreCount = parseFloat(coreMatch[0]);
+                    } else {
+                        let coreMatch = str.match(/(\d+(\.\d+)?) Virtual/g);
+                        coreCount = coreMatch ? parseFloat(coreMatch[0]) : 0;
+                    }
+                    totalCores += coreCount;
+                });
+                return `${totalCores} Cores`;
             },
             getK2Gb(bs){
                 bs = bs / 1024 / 1024 / 1024;

@@ -2,169 +2,182 @@ package ddns
 
 import (
 	"bytes"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+
+	"github.com/naiba/nezha/pkg/utils"
 )
 
+const baseEndpoint = "https://api.cloudflare.com/client/v4/zones"
+
 type ProviderCloudflare struct {
-	Secret string
+	isIpv4       bool
+	domainConfig *DomainConfig
+	secret       string
+	zoneId       string
+	ipAddr       string
+	recordId     string
+	recordType   string
 }
 
-func (provider *ProviderCloudflare) UpdateDomain(domainConfig *DomainConfig) bool {
-	if domainConfig == nil {
-		return false
-	}
+type cfReq struct {
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	Content string `json:"content"`
+	TTL     uint32 `json:"ttl"`
+	Proxied bool   `json:"proxied"`
+}
 
-	zoneID, err := provider.getZoneID(domainConfig.FullDomain)
+func NewProviderCloudflare(s string) *ProviderCloudflare {
+	return &ProviderCloudflare{
+		secret: s,
+	}
+}
+
+func (provider *ProviderCloudflare) UpdateDomain(domainConfig *DomainConfig) error {
+	if domainConfig == nil {
+		return fmt.Errorf("获取 DDNS 配置失败")
+	}
+	provider.domainConfig = domainConfig
+
+	err := provider.getZoneID()
 	if err != nil {
-		log.Printf("无法获取 zone ID: %s\n", err)
-		return false
+		return fmt.Errorf("无法获取 zone ID: %s", err)
 	}
 
 	// 当IPv4和IPv6同时成功才算作成功
-	var resultV4 = true
-	var resultV6 = true
-	if domainConfig.EnableIPv4 {
-		if !provider.addDomainRecord(zoneID, domainConfig, true) {
-			resultV4 = false
+	if provider.domainConfig.EnableIPv4 {
+		provider.isIpv4 = true
+		provider.recordType = getRecordString(provider.isIpv4)
+		provider.ipAddr = provider.domainConfig.Ipv4Addr
+		if err = provider.addDomainRecord(); err != nil {
+			return err
 		}
 	}
 
-	if domainConfig.EnableIpv6 {
-		if !provider.addDomainRecord(zoneID, domainConfig, false) {
-			resultV6 = false
+	if provider.domainConfig.EnableIpv6 {
+		provider.isIpv4 = false
+		provider.recordType = getRecordString(provider.isIpv4)
+		provider.ipAddr = provider.domainConfig.Ipv6Addr
+		if err = provider.addDomainRecord(); err != nil {
+			return err
 		}
 	}
 
-	return resultV4 && resultV6
+	return nil
 }
 
-func (provider *ProviderCloudflare) addDomainRecord(zoneID string, domainConfig *DomainConfig, isIpv4 bool) bool {
-	record, err := provider.findDNSRecord(zoneID, domainConfig.FullDomain, isIpv4)
+func (provider *ProviderCloudflare) addDomainRecord() error {
+	err := provider.findDNSRecord()
 	if err != nil {
-		log.Printf("查找 DNS 记录时出错: %s\n", err)
-		return false
+		if errors.Is(err, utils.ErrGjsonNotFound) {
+			// 添加 DNS 记录
+			return provider.createDNSRecord()
+		}
+		return fmt.Errorf("查找 DNS 记录时出错: %s", err)
 	}
 
-	if record == nil {
-		// 添加 DNS 记录
-		return provider.createDNSRecord(zoneID, domainConfig, isIpv4)
-	} else {
-		// 更新 DNS 记录
-		return provider.updateDNSRecord(zoneID, record["id"].(string), domainConfig, isIpv4)
-	}
+	// 更新 DNS 记录
+	return provider.updateDNSRecord()
 }
 
-func (provider *ProviderCloudflare) getZoneID(domain string) (string, error) {
-	_, realDomain := SplitDomain(domain)
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones?name=%s", realDomain)
-	body, err := provider.sendRequest("GET", url, nil)
+func (provider *ProviderCloudflare) getZoneID() error {
+	_, realDomain := splitDomain(provider.domainConfig.FullDomain)
+	zu, _ := url.Parse(baseEndpoint)
+
+	q := zu.Query()
+	q.Set("name", realDomain)
+	zu.RawQuery = q.Encode()
+
+	body, err := provider.sendRequest("GET", zu.String(), nil)
 	if err != nil {
-		return "", err
+		return err
 	}
 
-	var res map[string]interface{}
-	err = json.Unmarshal(body, &res)
+	result, err := utils.GjsonGet(body, "result.0.id")
 	if err != nil {
-		return "", err
+		return err
 	}
 
-	result := res["result"].([]interface{})
-	if len(result) > 0 {
-		zoneID := result[0].(map[string]interface{})["id"].(string)
-		return zoneID, nil
-	}
-
-	return "", fmt.Errorf("找不到 Zone ID")
+	provider.zoneId = result.String()
+	return nil
 }
 
-func (provider *ProviderCloudflare) findDNSRecord(zoneID string, domain string, isIPv4 bool) (map[string]interface{}, error) {
-	var ipType = "A"
-	if !isIPv4 {
-		ipType = "AAAA"
-	}
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records?type=%s&name=%s", zoneID, ipType, domain)
-	body, err := provider.sendRequest("GET", url, nil)
+func (provider *ProviderCloudflare) findDNSRecord() error {
+	de, _ := url.JoinPath(baseEndpoint, provider.zoneId, "dns_records")
+	du, _ := url.Parse(de)
+
+	q := du.Query()
+	q.Set("name", provider.domainConfig.FullDomain)
+	q.Set("type", provider.recordType)
+	du.RawQuery = q.Encode()
+
+	body, err := provider.sendRequest("GET", du.String(), nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	var res map[string]interface{}
-	err = json.Unmarshal(body, &res)
+	result, err := utils.GjsonGet(body, "result.0.id")
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	result := res["result"].([]interface{})
-	if len(result) > 0 {
-		return result[0].(map[string]interface{}), nil
-	}
-
-	return nil, nil // 没有找到 DNS 记录
+	provider.recordId = result.String()
+	return nil
 }
 
-func (provider *ProviderCloudflare) createDNSRecord(zoneID string, domainConfig *DomainConfig, isIPv4 bool) bool {
-	var ipType = "A"
-	var ipAddr = domainConfig.Ipv4Addr
-	if !isIPv4 {
-		ipType = "AAAA"
-		ipAddr = domainConfig.Ipv6Addr
+func (provider *ProviderCloudflare) createDNSRecord() error {
+	de, _ := url.JoinPath(baseEndpoint, provider.zoneId, "dns_records")
+	data := &cfReq{
+		Name:    provider.domainConfig.FullDomain,
+		Type:    provider.recordType,
+		Content: provider.ipAddr,
+		TTL:     60,
+		Proxied: false,
 	}
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records", zoneID)
-	data := map[string]interface{}{
-		"type":    ipType,
-		"name":    domainConfig.FullDomain,
-		"content": ipAddr,
-		"ttl":     60,
-		"proxied": false,
-	}
-	jsonData, _ := json.Marshal(data)
-	_, err := provider.sendRequest("POST", url, jsonData)
-	return err == nil
+
+	jsonData, _ := utils.Json.Marshal(data)
+	_, err := provider.sendRequest("POST", de, jsonData)
+	return err
 }
 
-func (provider *ProviderCloudflare) updateDNSRecord(zoneID string, recordID string, domainConfig *DomainConfig, isIPv4 bool) bool {
-	var ipType = "A"
-	var ipAddr = domainConfig.Ipv4Addr
-	if !isIPv4 {
-		ipType = "AAAA"
-		ipAddr = domainConfig.Ipv6Addr
+func (provider *ProviderCloudflare) updateDNSRecord() error {
+	de, _ := url.JoinPath(baseEndpoint, provider.zoneId, "dns_records", provider.recordId)
+	data := &cfReq{
+		Name:    provider.domainConfig.FullDomain,
+		Type:    provider.recordType,
+		Content: provider.ipAddr,
+		TTL:     60,
+		Proxied: false,
 	}
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records/%s", zoneID, recordID)
-	data := map[string]interface{}{
-		"type":    ipType,
-		"name":    domainConfig.FullDomain,
-		"content": ipAddr,
-		"ttl":     60,
-		"proxied": false,
-	}
-	jsonData, _ := json.Marshal(data)
-	_, err := provider.sendRequest("PATCH", url, jsonData)
-	return err == nil
+
+	jsonData, _ := utils.Json.Marshal(data)
+	_, err := provider.sendRequest("PATCH", de, jsonData)
+	return err
 }
 
 // 以下为辅助方法，如发送 HTTP 请求等
 func (provider *ProviderCloudflare) sendRequest(method string, url string, data []byte) ([]byte, error) {
-	client := &http.Client{}
 	req, err := http.NewRequest(method, url, bytes.NewBuffer(data))
 	if err != nil {
 		return nil, err
 	}
 
-	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", provider.Secret))
+	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", provider.secret))
 	req.Header.Add("Content-Type", "application/json")
 
-	resp, err := client.Do(req)
+	resp, err := utils.HttpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
-			log.Printf("NEZHA>> 无法关闭HTTP响应体流: %s\n", err.Error())
+			log.Printf("NEZHA>> 无法关闭HTTP响应体流: %s", err.Error())
 		}
 	}(resp.Body)
 

@@ -18,7 +18,7 @@
         </div>
     </div>
     <div class="ui container">
-        <div ref="chartDom" style="border-radius: 28px; margin-top: 15px;height: 520px;max-width: 1400px;overflow: hidden"></div>
+        <div ref="chartDom" style="margin-top: 15px;height: auto;overflow: hidden"></div>
     </div>
 </div>
 
@@ -36,7 +36,11 @@
             defaultTemplate: {{.Conf.Site.Theme}},
             templates: {{.Themes}},
             servers: initData,
-            option: {
+            option: {}
+        },
+        mixins: [mixinsVue],
+        created() {
+            this.option = {
                 tooltip: {
                     trigger: 'axis',
                     position: function (pt) {
@@ -65,21 +69,13 @@
                     }
                 },
                 grid: {
-                    left: '8%',
-                    right: '8%',
+                    left: this.isMobile ? '8%' : '3.8%',
+                    right: this.isMobile ? '8%' : '3.8%',
                 },
-                backgroundColor: 'rgba(255, 255, 255, 0.8)',
-                toolbox: {
-                    feature: {
-                        dataZoom: {
-                            yAxisIndex: 'none'
-                        },
-                        restore: {},
-                        saveAsImage: {}
-                    }
-                },
+                backgroundColor: '',
                 dataZoom: [
                     {
+                        type: 'slider',
                         start: 0,
                         end: 100
                     }
@@ -93,10 +89,8 @@
                     boundaryGap: false
                 },
                 series: [],
-            },
-            chartOnOff: true,
+            }
         },
-        mixins: [mixinsVue],
         mounted() {
             this.renderChart();
             this.parseMonitorInfo(monitorInfo);
@@ -236,6 +230,20 @@
                 this.option.title.text = monitorInfo.result[0].server_name;
                 this.option.series = tSeries;
                 this.option.legend.data = tLegendData;
+                const maxLegendsPerRowMobile = localStorage.getItem("maxLegendsPerRowMobile") ? localStorage.getItem("maxLegendsPerRowMobile") : 2;
+                const maxLegendsPerRowPc = localStorage.getItem("maxLegendsPerRowPc") ? localStorage.getItem("maxLegendsPerRowPc") : 6;
+                const autoIncrement = Math.floor((tLegendData.length - 1) / (this.isMobile ? maxLegendsPerRowMobile : maxLegendsPerRowPc)) * (this.isMobile ? 28 : 34);
+                const height = 520 + autoIncrement;
+                const gridTop = 60 + autoIncrement;
+                this.option.grid = {
+                    left: this.isMobile ? '8%' : '3.8%',
+                    right: this.isMobile ? '8%' : '3.8%',
+                    top: gridTop
+                };
+                this.myChart.resize({
+                    width: 'auto',
+                    height: height
+                });
                 this.myChart.clear();
                 this.myChart.setOption(this.option);
             },
@@ -243,7 +251,8 @@
                 return str.includes('Windows')
             },
             renderChart() {
-              this.myChart = echarts.init(this.$refs.chartDom);
+              const chartTheme = $('html').attr('nz-theme') == "dark" ? "dark" : "";
+              this.myChart = echarts.init(this.$refs.chartDom,chartTheme);
               this.myChart.setOption(this.option);
             },
             resizeHandle () {

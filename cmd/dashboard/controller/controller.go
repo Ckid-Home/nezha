@@ -1,13 +1,12 @@
 package controller
 
 import (
-	"encoding/json"
 	"fmt"
 	"html/template"
-	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -44,12 +43,7 @@ func ServeWeb(port uint) *http.Server {
 	tmpl = loadThirdPartyTemplates(tmpl)
 	r.SetHTMLTemplate(tmpl)
 	r.Use(mygin.RecordPath)
-	staticFs, err := fs.Sub(resource.StaticFS, "static")
-	if err != nil {
-		panic(err)
-	}
-	r.StaticFS("/static", http.FS(staticFs))
-	r.Static("/static-custom", "resource/static/custom")
+	r.StaticFS("/static", http.FS(resource.StaticFS))
 	routers(r)
 	page404 := func(c *gin.Context) {
 		mygin.ShowErrorPage(c, mygin.ErrInfo{
@@ -90,7 +84,7 @@ func routers(r *gin.Engine) {
 }
 
 func loadThirdPartyTemplates(tmpl *template.Template) *template.Template {
-	var ret = tmpl
+	ret := tmpl
 	themes, err := os.ReadDir("resource/template")
 	if err != nil {
 		log.Printf("NEZHA>> Error reading themes folder: %v", err)
@@ -100,15 +94,52 @@ func loadThirdPartyTemplates(tmpl *template.Template) *template.Template {
 		if !theme.IsDir() {
 			continue
 		}
-		// load templates
-		t, err := ret.ParseGlob(fmt.Sprintf("resource/template/%s/*.html", theme.Name()))
-		if err != nil {
-			log.Printf("NEZHA>> Error parsing templates %s error: %v", theme.Name(), err)
+
+		themeDir := theme.Name()
+		if strings.HasPrefix(themeDir, "dashboard-") {
+			// load dashboard templates, ignore desc file
+			ret = loadTemplates(ret, themeDir)
 			continue
 		}
-		ret = t
+
+		if !strings.HasPrefix(themeDir, "theme-") {
+			log.Printf("NEZHA>> Invalid theme name: %s", themeDir)
+			continue
+		}
+
+		descPath := filepath.Join("resource", "template", themeDir, "theme.json")
+		desc, err := os.ReadFile(filepath.Clean(descPath))
+		if err != nil {
+			log.Printf("NEZHA>> Error opening %s config: %v", themeDir, err)
+			continue
+		}
+
+		themeName, err := utils.GjsonGet(desc, "name")
+		if err != nil {
+			log.Printf("NEZHA>> Error opening %s config: not a valid description file", theme.Name())
+			continue
+		}
+
+		// load templates
+		ret = loadTemplates(ret, themeDir)
+
+		themeKey := strings.TrimPrefix(themeDir, "theme-")
+		model.Themes[themeKey] = themeName.String()
 	}
+
 	return ret
+}
+
+func loadTemplates(tmpl *template.Template, themeDir string) *template.Template {
+	// load templates
+	templatePath := filepath.Join("resource", "template", themeDir, "*.html")
+	t, err := tmpl.ParseGlob(templatePath)
+	if err != nil {
+		log.Printf("NEZHA>> Error parsing templates %s: %v", themeDir, err)
+		return tmpl
+	}
+
+	return t
 }
 
 var funcMap = template.FuncMap{
@@ -270,7 +301,7 @@ func natGateway(c *gin.Context) {
 	rpc.NezhaHandlerSingleton.CreateStream(streamId)
 	defer rpc.NezhaHandlerSingleton.CloseStream(streamId)
 
-	taskData, err := json.Marshal(model.TaskNAT{
+	taskData, err := utils.Json.Marshal(model.TaskNAT{
 		StreamID: streamId,
 		Host:     natConfig.Host,
 	})

@@ -5,145 +5,160 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/naiba/nezha/pkg/utils"
 )
 
-const (
-	url = "https://dnspod.tencentcloudapi.com"
-)
+const te = "https://dnspod.tencentcloudapi.com"
 
 type ProviderTencentCloud struct {
-	SecretID  string
-	SecretKey string
+	isIpv4       bool
+	domainConfig *DomainConfig
+	recordID     uint64
+	recordType   string
+	secretID     string
+	secretKey    string
+	errCode      string
+	ipAddr       string
 }
 
-func (provider *ProviderTencentCloud) UpdateDomain(domainConfig *DomainConfig) bool {
-	if domainConfig == nil {
-		return false
+type tcReq struct {
+	RecordType string `json:"RecordType"`
+	Domain     string `json:"Domain"`
+	RecordLine string `json:"RecordLine"`
+	Subdomain  string `json:"Subdomain,omitempty"`
+	SubDomain  string `json:"SubDomain,omitempty"` // As is
+	Value      string `json:"Value,omitempty"`
+	TTL        uint32 `json:"TTL,omitempty"`
+	RecordId   uint64 `json:"RecordId,omitempty"`
+}
+
+func NewProviderTencentCloud(id, key string) *ProviderTencentCloud {
+	return &ProviderTencentCloud{
+		secretID:  id,
+		secretKey: key,
 	}
+}
+
+func (provider *ProviderTencentCloud) UpdateDomain(domainConfig *DomainConfig) error {
+	if domainConfig == nil {
+		return fmt.Errorf("获取 DDNS 配置失败")
+	}
+	provider.domainConfig = domainConfig
 
 	// 当IPv4和IPv6同时成功才算作成功
-	var resultV4 = true
-	var resultV6 = true
-	if domainConfig.EnableIPv4 {
-		if !provider.addDomainRecord(domainConfig, true) {
-			resultV4 = false
+	var err error
+	if provider.domainConfig.EnableIPv4 {
+		provider.isIpv4 = true
+		provider.recordType = getRecordString(provider.isIpv4)
+		provider.ipAddr = provider.domainConfig.Ipv4Addr
+		if err = provider.addDomainRecord(); err != nil {
+			return err
 		}
 	}
 
-	if domainConfig.EnableIpv6 {
-		if !provider.addDomainRecord(domainConfig, false) {
-			resultV6 = false
+	if provider.domainConfig.EnableIpv6 {
+		provider.isIpv4 = false
+		provider.recordType = getRecordString(provider.isIpv4)
+		provider.ipAddr = provider.domainConfig.Ipv6Addr
+		if err = provider.addDomainRecord(); err != nil {
+			return err
 		}
 	}
 
-	return resultV4 && resultV6
+	return err
 }
 
-func (provider *ProviderTencentCloud) addDomainRecord(domainConfig *DomainConfig, isIpv4 bool) bool {
-	record, err := provider.findDNSRecord(domainConfig.FullDomain, isIpv4)
+func (provider *ProviderTencentCloud) addDomainRecord() error {
+	err := provider.findDNSRecord()
 	if err != nil {
-		log.Printf("查找 DNS 记录时出错: %s\n", err)
-		return false
+		return fmt.Errorf("查找 DNS 记录时出错: %s", err)
 	}
 
-	if errResponse, ok := record["Error"].(map[string]interface{}); ok {
-		if errCode, ok := errResponse["Code"].(string); ok && errCode == "ResourceNotFound.NoDataOfRecord" { // 没有找到 DNS 记录
-			// 添加 DNS 记录
-			return provider.createDNSRecord(domainConfig.FullDomain, domainConfig, isIpv4)
-		} else {
-			log.Printf("查询 DNS 记录时出错，错误代码为: %s\n", errCode)
-		}
+	if provider.errCode == "ResourceNotFound.NoDataOfRecord" { // 没有找到 DNS 记录
+		return provider.createDNSRecord()
+	} else if provider.errCode != "" {
+		return fmt.Errorf("查询 DNS 记录时出错，错误代码为: %s", provider.errCode)
 	}
 
 	// 默认情况下更新 DNS 记录
-	return provider.updateDNSRecord(domainConfig.FullDomain, record["RecordList"].([]interface{})[0].(map[string]interface{})["RecordId"].(float64), domainConfig, isIpv4)
+	return provider.updateDNSRecord()
 }
 
-func (provider *ProviderTencentCloud) findDNSRecord(domain string, isIPv4 bool) (map[string]interface{}, error) {
-	var ipType = "A"
-	if !isIPv4 {
-		ipType = "AAAA"
+func (provider *ProviderTencentCloud) findDNSRecord() error {
+	prefix, realDomain := splitDomain(provider.domainConfig.FullDomain)
+	data := &tcReq{
+		RecordType: provider.recordType,
+		Domain:     realDomain,
+		RecordLine: "默认",
+		Subdomain:  prefix,
 	}
-	_, realDomain := SplitDomain(domain)
-	prefix, _ := SplitDomain(domain)
-	data := map[string]interface{}{
-		"RecordType": ipType,
-		"Domain":     realDomain,
-		"RecordLine": "默认",
-		"Subdomain":  prefix,
-	}
-	jsonData, _ := json.Marshal(data)
+
+	jsonData, _ := utils.Json.Marshal(data)
 	body, err := provider.sendRequest("DescribeRecordList", jsonData)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	var res map[string]interface{}
-	err = json.Unmarshal(body, &res)
+	result, err := utils.GjsonGet(body, "Response.RecordList.0.RecordId")
 	if err != nil {
-		return nil, err
+		if errors.Is(err, utils.ErrGjsonNotFound) {
+			if errCode, err := utils.GjsonGet(body, "Response.Error.Code"); err == nil {
+				provider.errCode = errCode.String()
+				return nil
+			}
+		}
+		return err
 	}
 
-	result := res["Response"].(map[string]interface{})
-	return result, nil
+	provider.recordID = result.Uint()
+	return nil
 }
 
-func (provider *ProviderTencentCloud) createDNSRecord(domain string, domainConfig *DomainConfig, isIPv4 bool) bool {
-	var ipType = "A"
-	var ipAddr = domainConfig.Ipv4Addr
-	if !isIPv4 {
-		ipType = "AAAA"
-		ipAddr = domainConfig.Ipv6Addr
+func (provider *ProviderTencentCloud) createDNSRecord() error {
+	prefix, realDomain := splitDomain(provider.domainConfig.FullDomain)
+	data := &tcReq{
+		RecordType: provider.recordType,
+		RecordLine: "默认",
+		Domain:     realDomain,
+		SubDomain:  prefix,
+		Value:      provider.ipAddr,
+		TTL:        600,
 	}
-	_, realDomain := SplitDomain(domain)
-	prefix, _ := SplitDomain(domain)
-	data := map[string]interface{}{
-		"RecordType": ipType,
-		"RecordLine": "默认",
-		"Domain":     realDomain,
-		"SubDomain":  prefix,
-		"Value":      ipAddr,
-		"TTL":        600,
-	}
-	jsonData, _ := json.Marshal(data)
+
+	jsonData, _ := utils.Json.Marshal(data)
 	_, err := provider.sendRequest("CreateRecord", jsonData)
-	return err == nil
+	return err
 }
 
-func (provider *ProviderTencentCloud) updateDNSRecord(domain string, recordID float64, domainConfig *DomainConfig, isIPv4 bool) bool {
-	var ipType = "A"
-	var ipAddr = domainConfig.Ipv4Addr
-	if !isIPv4 {
-		ipType = "AAAA"
-		ipAddr = domainConfig.Ipv6Addr
+func (provider *ProviderTencentCloud) updateDNSRecord() error {
+	prefix, realDomain := splitDomain(provider.domainConfig.FullDomain)
+	data := &tcReq{
+		RecordType: provider.recordType,
+		RecordLine: "默认",
+		Domain:     realDomain,
+		SubDomain:  prefix,
+		Value:      provider.ipAddr,
+		TTL:        600,
+		RecordId:   provider.recordID,
 	}
-	_, realDomain := SplitDomain(domain)
-	prefix, _ := SplitDomain(domain)
-	data := map[string]interface{}{
-		"RecordType": ipType,
-		"RecordLine": "默认",
-		"Domain":     realDomain,
-		"SubDomain":  prefix,
-		"Value":      ipAddr,
-		"TTL":        600,
-		"RecordId":   recordID,
-	}
-	jsonData, _ := json.Marshal(data)
+
+	jsonData, _ := utils.Json.Marshal(data)
 	_, err := provider.sendRequest("ModifyRecord", jsonData)
-	return err == nil
+	return err
 }
 
 // 以下为辅助方法，如发送 HTTP 请求等
 func (provider *ProviderTencentCloud) sendRequest(action string, data []byte) ([]byte, error) {
-	client := &http.Client{}
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(data))
+	req, err := http.NewRequest("POST", te, bytes.NewBuffer(data))
 	if err != nil {
 		return nil, err
 	}
@@ -151,8 +166,8 @@ func (provider *ProviderTencentCloud) sendRequest(action string, data []byte) ([
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-TC-Version", "2021-03-23")
 
-	provider.signRequest(provider.SecretID, provider.SecretKey, req, action, string(data))
-	resp, err := client.Do(req)
+	provider.signRequest(provider.secretID, provider.secretKey, req, action, string(data))
+	resp, err := utils.HttpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
